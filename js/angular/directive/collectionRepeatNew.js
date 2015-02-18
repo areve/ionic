@@ -9,7 +9,7 @@
       (needs more testing)
 - [ ] Should we support horizontal scrolling?
 - [ ] Add errors for trying to setup collection-repeat on an x & y scrolling view.
-- [ ] Add support for elements before and after the repeater.
+- [x] Add support for elements before and after the repeater.
 
 ***********************************************/
 
@@ -19,7 +19,7 @@ IonicModule
 
 var ONE_PX_TRANSPARENT_IMG_SRC = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
 var WIDTH_HEIGHT_REGEX = /height:.*?px;\s*width:.*?px/;
-var ITEM_BUFFER_SIZE = 10;
+var SCROLL_ITEMS_BUFFER_COUNT = 10;
 
 function CollectionRepeatDirective($ionicCollectionManager, $parse, $window) {
   return {
@@ -36,8 +36,8 @@ function CollectionRepeatDirective($ionicCollectionManager, $parse, $window) {
 
       var scrollView = scrollCtrl.scrollView;
       var node = element[0];
-      var container = angular.element('<div class="collection-repeat-container">');
-      node.parentNode.replaceChild(container[0], node);
+      var containerNode = angular.element('<div class="collection-repeat-container">')[0];
+      node.parentNode.replaceChild(containerNode, node);
 
       var match = attr.collectionRepeat.match(/^\s*([\s\S]+?)\s+in\s+([\s\S]+?)(?:\s+track\s+by\s+([\s\S]+?))?\s*$/);
       if (!match) {
@@ -63,6 +63,25 @@ function CollectionRepeatDirective($ionicCollectionManager, $parse, $window) {
         parseDimensionAttr(attr.collectionItemWidth, widthData);
       }
 
+      var afterItemsContainer = angular.element(
+        scrollView.__content.querySelector('.collection-repeat-after-container')
+      );
+      if (!afterItemsContainer.length) {
+        var children = Array.prototype.slice.call(scrollView.__content.childNodes);
+        var elementIsAfterRepeater = false;
+        var afterNodes = children
+          .filter(function(node) {
+            if (node.contains(containerNode)) {
+              elementIsAfterRepeater = true;
+              return false;
+            }
+            return elementIsAfterRepeater;
+          })
+        afterItemsContainer = angular.element('<div class="collection-repeat-after-container">');
+        afterItemsContainer.append(afterNodes);
+        scrollView.__content.appendChild(afterItemsContainer[0]);
+      }
+
       scrollCtrl.$element.one('scroll.init', refreshDimensions);
       ionic.on('resize', ionic.animationFrameThrottle(validateResize), window);
 
@@ -70,6 +89,7 @@ function CollectionRepeatDirective($ionicCollectionManager, $parse, $window) {
         computedStyleNode && computedStyleNode.parentNode &&
           computedStyleNode.parentNode.removeChild(computedStyleNode);
         computedStyleScope && computedStyleScope.$destroy();
+        computedStyleScope = computedStyleNode = null;
         ionic.off('resize', validateResize, window);
       });
       scope.$on('$ionic.reconnectScope', function() {
@@ -113,7 +133,7 @@ function CollectionRepeatDirective($ionicCollectionManager, $parse, $window) {
 
         repeatManager || (repeatManager = new $ionicCollectionManager({
           scope: scope,
-          containerNode: container[0],
+          containerNode: containerNode,
           data: $parse(listExpr)(scope),
           keyExpression: keyExpr,
           listExpression: listExpr,
@@ -121,6 +141,7 @@ function CollectionRepeatDirective($ionicCollectionManager, $parse, $window) {
           widthData: widthData,
           scrollView: scrollCtrl.scrollView,
           transclude: transclude,
+          afterItemsNode: afterItemsContainer[0]
         }));
         repeatManager.refreshLayout();
       }
@@ -167,17 +188,17 @@ function CollectionRepeatDirective($ionicCollectionManager, $parse, $window) {
       function computeStyleDimensions() {
         if (!computedStyleNode) {
           transclude(computedStyleScope = scope.$new(), function(clone) {
-            clone[0].classList.add('collection-compute-element');
+            clone[0].removeAttribute('collection-repeat'); // remove absolute position styling
             computedStyleNode = clone[0];
           });
         }
-        container[0].appendChild(computedStyleNode);
+        containerNode.appendChild(computedStyleNode);
 
         var style = $window.getComputedStyle(computedStyleNode);
         computedStyleDimensions.width = parseInt(style.width);
         computedStyleDimensions.height = parseInt(style.height);
 
-        container[0].removeChild(computedStyleNode);
+        containerNode.removeChild(computedStyleNode);
       }
 
     };
@@ -201,6 +222,7 @@ function RepeatManagerFactory($rootScope, $window, $$rAF) {
     var listExpression = options.listExpression;
     var heightData = options.heightData;
     var widthData = options.widthData;
+    var afterItemsNode = options.afterItemsNode;
 
     var getterLocals = {};
     var heightFn = heightData.getValue || function() { return heightData.value; };
@@ -222,7 +244,9 @@ function RepeatManagerFactory($rootScope, $window, $$rAF) {
 
     var estimatedHeight;
     var estimatedWidth;
-    var repeaterTop;
+
+    var repeaterBeforeHeight = 0;
+    var repeaterAfterHeight = 0;
 
     var renderStartIndex = -1;
     var renderEndIndex = -1;
@@ -247,39 +271,42 @@ function RepeatManagerFactory($rootScope, $window, $$rAF) {
     );
 
     var isInitialized = false;
-    this.refreshLayout = function() {
+    this.refreshLayout = function(itemsAfterRepeater) {
       estimatedHeight = heightGetter(0, data[0]);
       estimatedWidth = widthGetter(0, data[0]);
       estimatedRowLength = isGridView ?
         Math.max(1, Math.floor(scrollView.__clientWidth / estimatedWidth)) :
         1;
 
-       repeaterTop = 0;
-       var current = containerNode;
-       do {
-         repeaterTop += current.offsetTop;
-       } while ( scrollView.__content.contains(current = current.offsetParent) );
+      repeaterAfterHeight = afterItemsNode.scrollHeight +
+        parseInt((getComputedStyle(afterItemsNode.lastElementChild) || {}).marginBottom || 0);
+
+      repeaterBeforeHeight = 0;
+      var current = containerNode;
+      do {
+        repeaterBeforeHeight += current.offsetTop;
+      } while ( scrollView.__content.contains(current = current.offsetParent) );
 
       if (!isInitialized) {
         var poolSize = (2 * scrollView.__clientHeight / (estimatedHeight * estimatedRowLength)) +
-          (ITEM_BUFFER_SIZE * 2)
+          (SCROLL_ITEMS_BUFFER_COUNT * 2)
         for (i = 0; i < poolSize; i++) {
           itemsPool.push(new RepeatItem());
         }
+        isInitialized = true;
       }
-      isInitialized = true;
 
       (collectionView.onRefreshLayout || angular.noop)();
       render(true);
     };
+    this.refreshLayout();
 
     this.refreshData = function(newData) {
       data = newData;
-      (collectionView.onRefreshData || angular.noop)();
-      render(true, renderStartIndex);
-    };
 
-    this.refreshData(options.data);
+      (collectionView.onRefreshData || angular.noop)();
+      render(true);
+    };
 
     scope.$watchCollection(listExpression, angular.bind(this, function(value) {
       if (!angular.isArray(value || [])) {
@@ -312,22 +339,23 @@ function RepeatManagerFactory($rootScope, $window, $$rAF) {
       var scrollTop = scrollView.__scrollTop;
       var scrollBottom = scrollTop + scrollView.__clientHeight;
 
-      collectionView.updateRenderRange(scrollTop, scrollBottom);
-      renderStartIndex = Math.max(0, renderStartIndex - ITEM_BUFFER_SIZE);
-      renderEndIndex = Math.min(data.length - 1, renderEndIndex + ITEM_BUFFER_SIZE);
+      collectionView.updateRenderRange(scrollTop + repeaterBeforeHeight, scrollBottom);
+      renderStartIndex = Math.max(0, renderStartIndex - SCROLL_ITEMS_BUFFER_COUNT);
+      renderEndIndex = Math.min(data.length - 1, renderEndIndex + SCROLL_ITEMS_BUFFER_COUNT);
 
       for (i in itemsShownMap) {
         if (forceRerender || (i < renderStartIndex || i > renderEndIndex)) {
           item = itemsShownMap[i];
           delete itemsShownMap[i];
-          itemsLeaving.push(item);
           item.isShown = false;
+          itemsLeaving.push(item);
         }
       }
 
       // Render indicies that aren't shown yet
       for (i = renderStartIndex; i <= renderEndIndex; i++) {
         if (itemsShownMap[i]) continue;
+
         itemsShownMap[i] = item = getNextItem();
 
         itemsEntering.push(item);
@@ -343,20 +371,19 @@ function RepeatManagerFactory($rootScope, $window, $$rAF) {
         itemScope.$middle = !(itemScope.$first || itemScope.$last);
         itemScope.$odd = !(itemScope.$even = (i&1) === 0);
 
-        //We changed the scope, so digest if needed
         if (itemScope.$$disconnected) ionic.Utils.reconnectScope(itemScope);
 
-        if (item.left !== dim.left || item.top !== dim.top) {
-          item.node.style[ionic.CSS.TRANSFORM] = 'translate3d(' + dim.left + 'px,' +
-            dim.top + 'px,0)';
-          item.left = dim.left;
-          item.top = dim.top;
-        }
         if (item.width !== dim.width || item.height !== dim.height) {
           item.node.style.cssText = item.node.style.cssText
             .replace(WIDTH_HEIGHT_REGEX, 'height:' + (dim.height + 1) + 'px;width:' + dim.width + 'px');
           item.width = dim.width;
           item.height = dim.height;
+        }
+        if (item.left !== dim.left || item.top !== dim.top) {
+          item.node.style[ionic.CSS.TRANSFORM] = 'translate3d(' + dim.left + 'px,' +
+            dim.top + 'px,0)';
+          item.left = dim.left;
+          item.top = dim.top;
         }
 
         // TODO make refresh images an attribute option
@@ -365,12 +392,21 @@ function RepeatManagerFactory($rootScope, $window, $$rAF) {
         //   img.src = ONE_PX_TRANSPARENT_IMG_SRC;
         //   img.src = src;
         // }
+
       }
+
+      // If we reach the end of the list, render the afterItemsNode - this contains all the
+      // elements the developer placed after the collection-repeat
+      if (renderEndIndex === data.length - 1) {
+        dim = collectionView.getDimensions(data.length - 1);
+        afterItemsNode.style[ionic.CSS.TRANSFORM] = 'translate3d(0,' + (dim.top + dim.height) + 'px,0)';
+      }
+
 
       while (itemsLeaving.length) {
         item = itemsLeaving.pop();
         item.left = item.top = null;
-        ionic.Utils.disconnectScope(item.scope);
+        item.scope && ionic.Utils.disconnectScope(item.scope);
         itemsPool.push(item);
       }
 
@@ -439,13 +475,14 @@ function RepeatManagerFactory($rootScope, $window, $$rAF) {
     }
 
     function StaticViewType() {
-      var dim = {};
       this.getContentHeight = function() {
-        return this.getEstimatedTop(data.length - 1) + estimatedHeight;
+        return this.getEstimatedTop(data.length - 1) + estimatedHeight + repeaterBeforeHeight +
+          repeaterAfterHeight;
       };
       // static view always returns the same object for getDimensions, to avoid memory allocation
       // while scrolling. This could be dangerous if this was a public function, but it's not.
       // Only we use it.
+      var dim = {};
       this.getDimensions = function(index) {
         dim.top = this.getEstimatedTop(index);
         dim.left = this.getEstimatedLeft(index);
@@ -511,7 +548,8 @@ function RepeatManagerFactory($rootScope, $window, $$rAF) {
       this.getContentHeight = function() {
         var dim = dimensions[dimensionsIndex] || EMPTY_DIMENSION;
         return ((dim.top + dim.height) || 0) +
-          this.getEstimatedTop(data.length - dimensionsIndex - 1);
+          this.getEstimatedTop(data.length - dimensionsIndex - 1) +
+          repeaterBeforeHeight + repeaterAfterHeight;
       };
       this.onRefreshData = function() {
         // Make sure dimensions has as many items as data.length.
